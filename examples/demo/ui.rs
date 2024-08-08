@@ -14,7 +14,7 @@ use ratatui::{
 use crate::app::App;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(f.size());
+    let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(f.area());
     let tabs = app
         .tabs
         .titles
@@ -49,7 +49,7 @@ fn draw_gauges(f: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(3),
-        Constraint::Length(1),
+        Constraint::Length(2),
     ])
     .margin(1)
     .split(area);
@@ -221,7 +221,7 @@ fn draw_charts(f: &mut Frame, app: &mut App, area: Rect) {
                     .title("Y Axis")
                     .style(Style::default().fg(Color::Gray))
                     .bounds([-20.0, 20.0])
-                    .labels(vec![
+                    .labels([
                         Span::styled("-20", Style::default().add_modifier(Modifier::BOLD)),
                         Span::raw("0"),
                         Span::styled("20", Style::default().add_modifier(Modifier::BOLD)),

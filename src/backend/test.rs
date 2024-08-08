@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     backend::{Backend, ClearType, WindowSize},
     buffer::{Buffer, Cell},
-    layout::{Rect, Size},
+    layout::{Position, Rect, Size},
 };
 
 /// A [`Backend`] implementation used for integration testing that renders to an memory buffer.
@@ -34,9 +34,7 @@ use crate::{
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TestBackend {
-    width: u16,
     buffer: Buffer,
-    height: u16,
     cursor: bool,
     pos: (u16, u16),
 }
@@ -74,8 +72,6 @@ impl TestBackend {
     /// Creates a new `TestBackend` with the specified width and height.
     pub fn new(width: u16, height: u16) -> Self {
         Self {
-            width,
-            height,
             buffer: Buffer::empty(Rect::new(0, 0, width, height)),
             cursor: false,
             pos: (0, 0),
@@ -90,8 +86,6 @@ impl TestBackend {
     /// Resizes the `TestBackend` to the specified width and height.
     pub fn resize(&mut self, width: u16, height: u16) {
         self.buffer.resize(Rect::new(0, 0, width, height));
-        self.width = width;
-        self.height = height;
     }
 
     /// Asserts that the `TestBackend`'s buffer is equal to the expected buffer.
@@ -123,6 +117,19 @@ impl TestBackend {
     {
         self.assert_buffer(&Buffer::with_lines(expected));
     }
+
+    /// Asserts that the `TestBackend`'s cursor position is equal to the expected one.
+    ///
+    /// This is a shortcut for `assert_eq!(self.get_cursor_position().unwrap(), expected)`.
+    ///
+    /// # Panics
+    /// When they are not equal, a panic occurs with a detailed error message showing the
+    /// differences between the expected and actual position.
+    #[track_caller]
+    pub fn assert_cursor_position<P: Into<Position>>(&mut self, position: P) {
+        let actual = self.get_cursor_position().unwrap();
+        assert_eq!(actual, position.into());
+    }
 }
 
 impl fmt::Display for TestBackend {
@@ -139,8 +146,7 @@ impl Backend for TestBackend {
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
         for (x, y, c) in content {
-            let cell = self.buffer.get_mut(x, y);
-            *cell = c.clone();
+            self.buffer[(x, y)] = c.clone();
         }
         Ok(())
     }
@@ -155,12 +161,12 @@ impl Backend for TestBackend {
         Ok(())
     }
 
-    fn get_cursor(&mut self) -> io::Result<(u16, u16)> {
-        Ok(self.pos)
+    fn get_cursor_position(&mut self) -> io::Result<Position> {
+        Ok(self.pos.into())
     }
 
-    fn set_cursor(&mut self, x: u16, y: u16) -> io::Result<()> {
-        self.pos = (x, y);
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        self.pos = position.into().into();
         Ok(())
     }
 
@@ -182,12 +188,12 @@ impl Backend for TestBackend {
             }
             ClearType::CurrentLine => {
                 let line_start_index = self.buffer.index_of(0, self.pos.1);
-                let line_end_index = self.buffer.index_of(self.width - 1, self.pos.1);
+                let line_end_index = self.buffer.index_of(self.buffer.area.width - 1, self.pos.1);
                 &mut self.buffer.content[line_start_index..=line_end_index]
             }
             ClearType::UntilNewLine => {
                 let index = self.buffer.index_of(self.pos.0, self.pos.1);
-                let line_end_index = self.buffer.index_of(self.width - 1, self.pos.1);
+                let line_end_index = self.buffer.index_of(self.buffer.area.width - 1, self.pos.1);
                 &mut self.buffer.content[index..=line_end_index]
             }
         };
@@ -210,45 +216,44 @@ impl Backend for TestBackend {
     /// case but this limit is instead replaced with scrolling in most backend implementations) will
     /// be added after the current position and the cursor will be moved to the last row.
     fn append_lines(&mut self, n: u16) -> io::Result<()> {
-        let (cur_x, cur_y) = self.get_cursor()?;
+        let Position { x: cur_x, y: cur_y } = self.get_cursor_position()?;
+        let Rect { width, height, .. } = self.buffer.area;
 
         // the next column ensuring that we don't go past the last column
-        let new_cursor_x = cur_x.saturating_add(1).min(self.width.saturating_sub(1));
+        let new_cursor_x = cur_x.saturating_add(1).min(width.saturating_sub(1));
 
-        let max_y = self.height.saturating_sub(1);
+        let max_y = height.saturating_sub(1);
         let lines_after_cursor = max_y.saturating_sub(cur_y);
         if n > lines_after_cursor {
             let rotate_by = n.saturating_sub(lines_after_cursor).min(max_y);
 
-            if rotate_by == self.height - 1 {
+            if rotate_by == height - 1 {
                 self.clear()?;
             }
 
-            self.set_cursor(0, rotate_by)?;
+            self.set_cursor_position(Position { x: 0, y: rotate_by })?;
             self.clear_region(ClearType::BeforeCursor)?;
-            self.buffer
-                .content
-                .rotate_left((self.width * rotate_by).into());
+            self.buffer.content.rotate_left((width * rotate_by).into());
         }
 
         let new_cursor_y = cur_y.saturating_add(n).min(max_y);
-        self.set_cursor(new_cursor_x, new_cursor_y)?;
+        self.set_cursor_position(Position::new(new_cursor_x, new_cursor_y))?;
 
         Ok(())
     }
 
-    fn size(&self) -> io::Result<Rect> {
-        Ok(Rect::new(0, 0, self.width, self.height))
+    fn size(&self) -> io::Result<Size> {
+        Ok(self.buffer.area.as_size())
     }
 
     fn window_size(&mut self) -> io::Result<WindowSize> {
         // Some arbitrary window pixel size, probably doesn't need much testing.
-        static WINDOW_PIXEL_SIZE: Size = Size {
+        const WINDOW_PIXEL_SIZE: Size = Size {
             width: 640,
             height: 480,
         };
         Ok(WindowSize {
-            columns_rows: (self.width, self.height).into(),
+            columns_rows: self.buffer.area.as_size(),
             pixels: WINDOW_PIXEL_SIZE,
         })
     }
@@ -267,8 +272,6 @@ mod tests {
         assert_eq!(
             TestBackend::new(10, 2),
             TestBackend {
-                width: 10,
-                height: 2,
                 buffer: Buffer::with_lines(["          "; 2]),
                 cursor: false,
                 pos: (0, 0),
@@ -350,15 +353,23 @@ mod tests {
     }
 
     #[test]
-    fn get_cursor() {
+    fn get_cursor_position() {
         let mut backend = TestBackend::new(10, 2);
-        assert_eq!(backend.get_cursor().unwrap(), (0, 0));
+        assert_eq!(backend.get_cursor_position().unwrap(), Position::ORIGIN);
     }
 
     #[test]
-    fn set_cursor() {
+    fn assert_cursor_position() {
+        let mut backend = TestBackend::new(10, 2);
+        backend.assert_cursor_position(Position::ORIGIN);
+    }
+
+    #[test]
+    fn set_cursor_position() {
         let mut backend = TestBackend::new(10, 10);
-        backend.set_cursor(5, 5).unwrap();
+        backend
+            .set_cursor_position(Position { x: 5, y: 5 })
+            .unwrap();
         assert_eq!(backend.pos, (5, 5));
     }
 
@@ -404,7 +415,9 @@ mod tests {
             "aaaaaaaaaa",
         ]);
 
-        backend.set_cursor(3, 2).unwrap();
+        backend
+            .set_cursor_position(Position { x: 3, y: 2 })
+            .unwrap();
         backend.clear_region(ClearType::AfterCursor).unwrap();
         backend.assert_buffer_lines([
             "aaaaaaaaaa",
@@ -426,7 +439,9 @@ mod tests {
             "aaaaaaaaaa",
         ]);
 
-        backend.set_cursor(5, 3).unwrap();
+        backend
+            .set_cursor_position(Position { x: 5, y: 3 })
+            .unwrap();
         backend.clear_region(ClearType::BeforeCursor).unwrap();
         backend.assert_buffer_lines([
             "          ",
@@ -448,7 +463,9 @@ mod tests {
             "aaaaaaaaaa",
         ]);
 
-        backend.set_cursor(3, 1).unwrap();
+        backend
+            .set_cursor_position(Position { x: 3, y: 1 })
+            .unwrap();
         backend.clear_region(ClearType::CurrentLine).unwrap();
         backend.assert_buffer_lines([
             "aaaaaaaaaa",
@@ -470,7 +487,9 @@ mod tests {
             "aaaaaaaaaa",
         ]);
 
-        backend.set_cursor(3, 0).unwrap();
+        backend
+            .set_cursor_position(Position { x: 3, y: 0 })
+            .unwrap();
         backend.clear_region(ClearType::UntilNewLine).unwrap();
         backend.assert_buffer_lines([
             "aaa       ",
@@ -492,22 +511,22 @@ mod tests {
             "eeeeeeeeee",
         ]);
 
-        backend.set_cursor(0, 0).unwrap();
+        backend.set_cursor_position(Position::ORIGIN).unwrap();
 
         // If the cursor is not at the last line in the terminal the addition of a
         // newline simply moves the cursor down and to the right
 
         backend.append_lines(1).unwrap();
-        assert_eq!(backend.get_cursor().unwrap(), (1, 1));
+        backend.assert_cursor_position(Position { x: 1, y: 1 });
 
         backend.append_lines(1).unwrap();
-        assert_eq!(backend.get_cursor().unwrap(), (2, 2));
+        backend.assert_cursor_position(Position { x: 2, y: 2 });
 
         backend.append_lines(1).unwrap();
-        assert_eq!(backend.get_cursor().unwrap(), (3, 3));
+        backend.assert_cursor_position(Position { x: 3, y: 3 });
 
         backend.append_lines(1).unwrap();
-        assert_eq!(backend.get_cursor().unwrap(), (4, 4));
+        backend.assert_cursor_position(Position { x: 4, y: 4 });
 
         // As such the buffer should remain unchanged
         backend.assert_buffer_lines([
@@ -532,7 +551,9 @@ mod tests {
 
         // If the cursor is at the last line in the terminal the addition of a
         // newline will scroll the contents of the buffer
-        backend.set_cursor(0, 4).unwrap();
+        backend
+            .set_cursor_position(Position { x: 0, y: 4 })
+            .unwrap();
 
         backend.append_lines(1).unwrap();
 
@@ -546,7 +567,7 @@ mod tests {
 
         // It also moves the cursor to the right, as is common of the behaviour of
         // terminals in raw-mode
-        assert_eq!(backend.get_cursor().unwrap(), (1, 4));
+        backend.assert_cursor_position(Position { x: 1, y: 4 });
     }
 
     #[test]
@@ -560,13 +581,13 @@ mod tests {
             "eeeeeeeeee",
         ]);
 
-        backend.set_cursor(0, 0).unwrap();
+        backend.set_cursor_position(Position::ORIGIN).unwrap();
 
         // If the cursor is not at the last line in the terminal the addition of multiple
         // newlines simply moves the cursor n lines down and to the right by 1
 
         backend.append_lines(4).unwrap();
-        assert_eq!(backend.get_cursor().unwrap(), (1, 4));
+        backend.assert_cursor_position(Position { x: 1, y: 4 });
 
         // As such the buffer should remain unchanged
         backend.assert_buffer_lines([
@@ -589,10 +610,12 @@ mod tests {
             "eeeeeeeeee",
         ]);
 
-        backend.set_cursor(0, 3).unwrap();
+        backend
+            .set_cursor_position(Position { x: 0, y: 3 })
+            .unwrap();
 
         backend.append_lines(3).unwrap();
-        assert_eq!(backend.get_cursor().unwrap(), (1, 4));
+        backend.assert_cursor_position(Position { x: 1, y: 4 });
 
         backend.assert_buffer_lines([
             "cccccccccc",
@@ -614,10 +637,12 @@ mod tests {
             "eeeeeeeeee",
         ]);
 
-        backend.set_cursor(0, 4).unwrap();
+        backend
+            .set_cursor_position(Position { x: 0, y: 4 })
+            .unwrap();
 
         backend.append_lines(5).unwrap();
-        assert_eq!(backend.get_cursor().unwrap(), (1, 4));
+        backend.assert_cursor_position(Position { x: 1, y: 4 });
 
         backend.assert_buffer_lines([
             "          ",
@@ -639,10 +664,10 @@ mod tests {
             "eeeeeeeeee",
         ]);
 
-        backend.set_cursor(0, 0).unwrap();
+        backend.set_cursor_position(Position::ORIGIN).unwrap();
 
         backend.append_lines(5).unwrap();
-        assert_eq!(backend.get_cursor().unwrap(), (1, 4));
+        backend.assert_cursor_position(Position { x: 1, y: 4 });
 
         backend.assert_buffer_lines([
             "bbbbbbbbbb",
@@ -656,7 +681,7 @@ mod tests {
     #[test]
     fn size() {
         let backend = TestBackend::new(10, 2);
-        assert_eq!(backend.size().unwrap(), Rect::new(0, 0, 10, 2));
+        assert_eq!(backend.size().unwrap(), Size::new(10, 2));
     }
 
     #[test]

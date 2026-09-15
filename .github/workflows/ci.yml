@@ -1,5 +1,9 @@
 name: Continuous Integration
 
+# Set the permissions of the github token to the minimum and only enable what is needed
+# See https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions
+permissions: {}
+
 on:
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
@@ -9,7 +13,6 @@ on:
   pull_request:
     branches:
       - main
-  merge_group:
 
 # ensure that the workflow is only triggered once per PR,  subsequent pushes to the PR will cancel
 # and restart the workflow. See https://docs.github.com/en/actions/using-jobs/using-concurrency
@@ -17,153 +20,349 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
-env:
-  # don't install husky hooks during CI as they are only needed for for pre-push
-  CARGO_HUSKY_DONT_INSTALL_HOOKS: true
-
-# lint, clippy and coveraget jobs are intentionally early in the workflow to catch simple
-# formatting, typos, and missing tests as early as possible. This allows us to fix these and
-# resubmit the PR without having to wait for the comprehensive matrix of tests to complete.
+# lint, clippy and coverage jobs are intentionally early in the workflow to catch simple formatting,
+# typos, and missing tests as early as possible. This allows us to fix these and resubmit the PR
+# without having to wait for the comprehensive matrix of tests to complete.
 jobs:
-  rustfmt:
+  # Lint the formatting of the codebase.
+  lint-formatting:
+    name: Check Formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: nightly
           components: rustfmt
-      - run: cargo +nightly fmt --all --check
-
-  typos:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: crate-ci/typos@master
-
-  dependencies:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v1
-
-  clippy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: tombi-toml/setup-tombi@0ca8607861bce3508ba79339c7c47acb40a334e1 # v1.5.4
         with:
-          components: clippy
-      - name: Install cargo-make
-        uses: taiki-e/install-action@cargo-make
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo make clippy
+          version: "0.9.19"
+      - run: cargo xtask format --check
 
-  markdownlint:
+  # Check for typos in the codebase.
+  # See <https://github.com/crate-ci/typos/>
+  lint-typos:
+    name: Check Typos
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Lint markdown
-        uses: DavidAnson/markdownlint-cli2-action@v16
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: crate-ci/typos@d43b6c087ac471e2ea7b8af622ff15f05c0c365b # master
+
+  # Check for any disallowed dependencies in the codebase due to license / security issues.
+  # See <https://github.com/EmbarkStudios/cargo-deny>
+  cargo-deny:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        checks:
+          - advisories
+          - bans licenses sources
+    # Prevent sudden announcement of a new advisory from failing ci:
+    continue-on-error: ${{ matrix.checks == 'advisories' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          rust-version: stable
+          log-level: info
+          arguments: --all-features --exclude-unpublished
+          command: check ${{ matrix.checks }}
+
+  # Check for any unused dependencies in the codebase.
+  # See <https://github.com/bnjbvr/cargo-machete/>
+  cargo-machete:
+    name: Check Unused Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: bnjbvr/cargo-machete@ac30a525c0a8d163a92d727b3ff079ee3f6ecb08 # v0.9.2
+
+  # Check for unused dependencies that static source scanning cannot distinguish.
+  # This complements cargo-machete by compiling the workspace and checking rustc dep-info.
+  cargo-udeps:
+    name: Check Unused Dependencies
+    runs-on: ubuntu-latest
+    # cargo-udeps requires nightly; pin it so nightly lint changes do not break CI unexpectedly.
+    env:
+      RATATUI_NIGHTLY_TOOLCHAIN: nightly-2026-07-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: ${{ env.RATATUI_NIGHTLY_TOOLCHAIN }}
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: cargo-udeps
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo xtask udeps
+
+  # Run cargo clippy.
+  #
+  # We check for clippy warnings on beta, but these are not hard failures. They should often be
+  # fixed to prevent clippy failing on the next stable release, but don't block PRs on them unless
+  # they are introduced by the PR.
+  lint-clippy:
+    name: Check Clippy
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["stable", "beta"]
+    continue-on-error: ${{ matrix.toolchain == 'beta' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo xtask clippy
+        env:
+          RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+
+  # Run markdownlint on all markdown files in the repository.
+  lint-markdown:
+    name: Check Markdown
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
         with:
           globs: |
             '**/*.md'
             '!target'
 
+  # Run cargo coverage. This will generate a coverage report and upload it to codecov.
+  # <https://app.codecov.io/gh/ratatui/ratatui>
   coverage:
+    name: Coverage Report
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
           components: llvm-tools
-      - name: Install cargo-llvm-cov and cargo-make
-        uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
         with:
-          tool: cargo-llvm-cov,cargo-make
-      - uses: Swatinem/rust-cache@v2
-      - name: Generate coverage
-        run: cargo make coverage
-      - name: Upload to codecov.io
-        uses: codecov/codecov-action@v4
+          tool: cargo-llvm-cov
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo xtask coverage
+      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
 
+  # Run cargo check. This is a fast way to catch any obvious errors in the code.
   check:
+    name: Check ${{ matrix.os }} ${{ matrix.toolchain }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        toolchain: ["1.74.0", "stable"]
+        toolchain: ["1.88.0", "stable"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust {{ matrix.toolchain }}
-        uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: ${{ matrix.toolchain }}
-      - name: Install cargo-make
-        uses: taiki-e/install-action@cargo-make
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo make check
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
+        with:
+          tool: cargo-hack
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo xtask check --all-features
         env:
-          RUST_BACKTRACE: full
+          RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
 
-  lint-docs:
+  # Check that dependency lower bounds are accurate.
+  minimal-versions:
+    name: Check Minimal Versions
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
-      - name: Install cargo-make
-        uses: taiki-e/install-action@cargo-make
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo make lint-docs
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: cargo-minimal-versions,cargo-hack
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo minimal-versions check --direct --workspace --all-features --all-targets
 
-  test-doc:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  build-no-std:
+    name: Build No-Std
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-make
-        uses: taiki-e/install-action@cargo-make
-      - uses: Swatinem/rust-cache@v2
-      - name: Test docs
-        run: cargo make test-doc
-        env:
-          RUST_BACKTRACE: full
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # This makes it easier to debug the exact versions of the dependencies
+      - run: cargo tree --target x86_64-unknown-none -p ratatui-core
+      - run: cargo tree --target x86_64-unknown-none -p ratatui-widgets
+      - run: cargo tree --target x86_64-unknown-none -p ratatui-macros
+      - run: cargo tree --target x86_64-unknown-none -p ratatui --no-default-features
+      - run: cargo build --target x86_64-unknown-none -p ratatui-core
+      - run: cargo build --target x86_64-unknown-none -p ratatui-widgets
+      - run: cargo build --target x86_64-unknown-none -p ratatui-macros
+      - run: cargo build --target x86_64-unknown-none -p ratatui --no-default-features
 
-  test:
+  # Check if README.md is up-to-date with the crate's documentation.
+  check-readme:
+    name: Check README
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
+        with:
+          tool: cargo-rdme
+      - run: cargo rdme install-rust-toolchain-for-intralinks
+      - run: cargo xtask readme --check
+
+  # Run cargo rustdoc with the same options that would be used by docs.rs, taking into account the
+  # package.metadata.docs.rs configured in Cargo.toml. https://github.com/dtolnay/cargo-docs-rs
+  lint-docs:
+    name: Check Docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: nightly
+      - uses: dtolnay/install@74f735cdf643820234e37ae1c4089a08fd266d8a # master
+        with:
+          crate: cargo-docs-rs
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
+        with:
+          tool: cargo-hack
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo xtask docs
+
+  # Run cargo test on the documentation of the crate. This will catch any code examples that don't
+  # compile, or any other issues in the documentation.
+  test-docs:
+    name: Test Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
+        with:
+          tool: cargo-hack
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo xtask test-docs
+
+  # Run cargo test on the libraries of the crate.
+  test-libs:
+    name: Test Libs ${{ matrix.toolchain }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.88.0", "stable"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
+        with:
+          tool: cargo-hack
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo xtask test-libs
+
+  # Run cargo test on all the backends.
+  test-backends:
+    name: Test ${{matrix.backend}} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        toolchain: ["1.74.0", "stable"]
-        backend: [crossterm, termion, termwiz]
+        backend: [crossterm, termion, termina, termwiz]
         exclude:
           # termion is not supported on windows
           - os: windows-latest
             backend: termion
-    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust ${{ matrix.toolchain }}}
-        uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: ${{ matrix.toolchain }}
-      - name: Install cargo-make
-        uses: taiki-e/install-action@cargo-make
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo make test-backend ${{ matrix.backend }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo xtask test-backend ${{ matrix.backend }}
+
+  required:
+    runs-on: ubuntu-latest
+    needs:
+      - lint-formatting
+      - lint-typos
+      - cargo-deny
+      - cargo-machete
+      - cargo-udeps
+      - lint-clippy
+      - lint-markdown
+      - coverage
+      - check
+      - minimal-versions
+      - build-no-std
+      - check-readme
+      - lint-docs
+      - test-docs
+      - test-libs
+      - test-backends
+    if: ${{ always() }}
+    steps:
+      - name: Check required jobs
         env:
-          RUST_BACKTRACE: full
+          NEEDS_JSON: ${{ toJson(needs) }}
+          HAS_FAILED_JOB: >-
+            ${{
+              contains(needs.*.result, 'failure')
+              || contains(needs.*.result, 'cancelled')
+              || contains(needs.*.result, 'skipped')
+            }}
+        run: |
+          echo "$NEEDS_JSON"
+          test "$HAS_FAILED_JOB" = "false"

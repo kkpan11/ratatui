@@ -1,14 +1,14 @@
 # This is a vhs script. See https://github.com/charmbracelet/vhs for more info.
-# To run this script, install vhs and run `vhs ./examples/constraint-explorer.tape`
+# To run this script, install vhs and run `vhs ./examples/vhs/constraint-explorer.tape`
 Output "target/constraint-explorer.gif"
 Set Theme "Aardvark Blue"
 Set FontSize 18
 Set Width 1200
-Set Height 950
+Set Height 1330
 Hide
-Type "cargo run --example=constraint-explorer --features=crossterm"
+Type "cargo run -p constraint-explorer"
 Enter
-Sleep 2s
+Wait+Screen /Constraint Explorer/
 Show
 Set TypingSpeed 2s
 Type "1"
